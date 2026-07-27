@@ -28,4 +28,4 @@ Note: a `.mcpb` built on Windows carries Windows-only native bindings for the se
 
 ## History
 
-Grew out of the standalone project at `C:\data\apps\windows-live-connector` (now superseded by `packages/windows-live-connector`; the old directory can be deleted once nothing references it). Per-package plans in `packages/*/PLAN.md`.
+Grew out of the standalone project where I tinkered with windows live connectivity because I live in that eco system in addition to Google and Apple. 
