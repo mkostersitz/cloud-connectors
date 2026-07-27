@@ -23,7 +23,7 @@ OneDrive (`Files.*`) and Outlook Mail (`Mail.*`) delegated permissions **are** f
 | Teams (personal MSA) | ❌ No Graph API | Phase 0 spike re-verifies; if still unsupported, descope to backlog |
 | Teams Free / "Teams Essentials" | ✅ (these are Entra ID accounts) | Works if the account is actually Entra-backed, not MSA |
 
-**Phase 0 must determine which kind of Teams account you actually have.** If you signed into Teams with `spartan114@me.com` as a pure personal account, Teams is out of v1. If it's a Teams Free org account, Teams support becomes a config option (the app registration below already allows both account types).
+**Phase 0 must determine which kind of Teams account you actually have.** If you signed into Teams with a pure personal Microsoft account, Teams is out of v1. If it's a Teams Free org account, Teams support becomes a config option (the app registration below already allows both account types).
 
 ---
 

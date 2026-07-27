@@ -43,7 +43,7 @@ Safety invariants: all drive paths resolved and confined under the iCloud root (
 1. Scaffold package (done by orchestrator).
 2. Mail module + Drive module — parallel subagents.
 3. Integration, build, manifest, `.mcpb` pack (orchestrator + pack script).
-4. Live verification — needs the user to generate an app-specific password and configure the extension; connector is testable against spartan114@me.com.
+4. Live verification — needs the user to generate an app-specific password and configure the extension; connector is testable against the owner's iCloud account.
 5. v2 candidates: CalDAV calendar, CardDAV contacts, IMAP IDLE-based "check for new mail since".
 
 ## Risks
