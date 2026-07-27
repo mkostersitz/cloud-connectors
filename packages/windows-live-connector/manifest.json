@@ -1,0 +1,62 @@
+{
+  "manifest_version": "0.3",
+  "name": "windows-live-connector",
+  "display_name": "Windows Live (OneDrive + Outlook)",
+  "version": "0.2.2",
+  "description": "Give Claude access to your personal Microsoft Account's OneDrive and Outlook Mail via Microsoft Graph.",
+  "long_description": "Local MCP server giving Claude Desktop access to a personal Microsoft Account's OneDrive and Outlook Mail via Microsoft Graph.\n\nAuth is OAuth 2.0 authorization-code + PKCE (public client, no secret) - the connector never sees your password. Tokens are cached using your OS's secure credential store where available: Windows DPAPI, or macOS Keychain (falling back to a permissions-restricted plaintext file if the platform-native binding isn't available, with a warning printed to the logs).\n\nYou will need to register a free Microsoft Entra app once (no admin consent, no verification, no cost) and paste its Application (client) ID in during setup - instructions are shown in the configuration field below.\n\nTeams is intentionally out of scope: Microsoft Graph does not expose Teams chat APIs to personal Microsoft accounts.\n\nSafety properties:\n- Sending mail and deleting files are separate, clearly-annotated destructive tools; Claude is instructed to confirm with you before calling them.\n- Deletes go to the OneDrive recycle bin, never permanent.\n- Attachment saves cap at 25 MB, file reads at 100 MB; filenames are sanitized.\n- stdout carries only MCP protocol traffic; all diagnostics go to stderr (visible in Claude Desktop's MCP logs).",
+  "author": {
+    "name": "Michael Kostersitz"
+  },
+  "license": "MIT",
+  "keywords": ["microsoft", "onedrive", "outlook", "mail", "graph", "microsoft 365", "personal microsoft account"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MS_CLIENT_ID": "${user_config.client_id}"
+      }
+    }
+  },
+  "user_config": {
+    "client_id": {
+      "type": "string",
+      "title": "Microsoft App (client) ID",
+      "description": "Register a free app once at https://entra.microsoft.com -> Applications -> App registrations -> New registration. Supported account types: 'Personal Microsoft accounts only'. Platform: 'Mobile and desktop applications', redirect URI 'http://localhost'. Then paste the 'Application (client) ID' from the app's overview page here. The same registration works unchanged on both Windows and macOS.",
+      "required": true,
+      "sensitive": false
+    }
+  },
+  "tools": [
+    { "name": "ms_login", "description": "Signs in to your personal Microsoft account via an interactive browser-based OAuth flow (authorization code + PKCE); the connector never sees your password." },
+    { "name": "ms_logout", "description": "Clears the cached Microsoft account and tokens for this connector." },
+    { "name": "ms_whoami", "description": "Reports whether a Microsoft account is currently signed in, which account it is, and when the current access token expires." },
+    { "name": "mail_list", "description": "Lists messages from a mail folder (default inbox), newest first." },
+    { "name": "mail_search", "description": "Searches messages across the mailbox using a relevance-ordered query." },
+    { "name": "mail_read", "description": "Fetches the full content of a single message, including a plain-text body and attachment list." },
+    { "name": "mail_get_attachment", "description": "Downloads a single file attachment from a message and saves it to disk (max 25 MB)." },
+    { "name": "mail_create_draft", "description": "Creates a new draft message (not sent) - the preferred way to compose email for review before sending." },
+    { "name": "mail_send", "description": "Sends an email immediately and irreversibly, either newly composed or from an existing draft." },
+    { "name": "mail_move", "description": "Moves a message to another mail folder." },
+    { "name": "mail_mark", "description": "Updates the read state and/or flag state of a message." },
+    { "name": "onedrive_list", "description": "Lists the children of a OneDrive folder (files and subfolders)." },
+    { "name": "onedrive_search", "description": "Searches OneDrive for items matching a query, optionally scoped to a folder." },
+    { "name": "onedrive_get_metadata", "description": "Fetches full metadata for a OneDrive item: size, timestamps, web URL, hashes, etc." },
+    { "name": "onedrive_read_file", "description": "Reads a OneDrive file's content - small text files inline, others saved to disk (max 100 MB)." },
+    { "name": "onedrive_upload_file", "description": "Uploads a local file to OneDrive, using chunked upload sessions above 4 MB (max 250 MB)." },
+    { "name": "onedrive_create_folder", "description": "Creates a new folder under a given OneDrive parent path." },
+    { "name": "onedrive_move", "description": "Moves and/or renames a OneDrive item." },
+    { "name": "onedrive_delete", "description": "Deletes a OneDrive item to the recycle bin (recoverable, never permanent)." }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["win32", "darwin"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "privacy_policies": []
+}

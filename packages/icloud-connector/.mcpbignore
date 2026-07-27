@@ -1,0 +1,7 @@
+src/
+tsconfig.json
+PLAN.md
+*.ts
+*.ts.map
+*.tsbuildinfo
+.mcpbignore

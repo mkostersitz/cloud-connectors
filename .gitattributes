@@ -1,0 +1,5 @@
+# Normalize to LF in the repo and in working copies - keeps Windows/macOS checkouts identical.
+* text=auto eol=lf
+*.mcpb binary
+*.node binary
+*.tgz binary

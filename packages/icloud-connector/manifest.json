@@ -1,0 +1,76 @@
+{
+  "manifest_version": "0.3",
+  "name": "icloud-connector",
+  "display_name": "iCloud (Mail + Drive)",
+  "version": "0.1.1",
+  "description": "Give Claude access to your iCloud Mail (IMAP/SMTP) and your local iCloud Drive folder.",
+  "long_description": "Local MCP server giving Claude Desktop access to a personal iCloud account.\n\nMail uses Apple's officially supported IMAP/SMTP servers (imap.mail.me.com / smtp.mail.me.com) with an app-specific password you generate at https://account.apple.com - Apple offers no OAuth for third-party apps, so this password is a full-mailbox credential; it is stored by Claude Desktop in your OS keychain (marked sensitive), never persisted or logged by the connector, and individually revocable at account.apple.com.\n\niCloud Drive has no public API, so the Drive tools operate on your local iCloud Drive sync folder (Windows: %USERPROFILE%\\iCloudDrive via iCloud for Windows; macOS: ~/Library/Mobile Documents/com~apple~CloudDocs). The iCloud client must be installed and syncing. All paths are strictly confined to that folder.\n\nSafety properties:\n- Sending mail and deleting files are separate, clearly-annotated destructive tools; Claude is instructed to confirm with you before calling them.\n- Drive deletes go to the OS recycle bin, never permanent.\n- Attachment saves cap at 25 MB, file reads at 100 MB; filenames are sanitized; drive paths cannot escape the iCloud folder (symlinks resolved).\n- stdout carries only MCP protocol traffic; diagnostics go to stderr (visible in Claude Desktop's MCP logs).",
+  "author": {
+    "name": "Michael Kostersitz"
+  },
+  "license": "MIT",
+  "keywords": ["icloud", "apple", "mail", "imap", "icloud drive", "me.com", "icloud.com"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "ICLOUD_EMAIL": "${user_config.apple_id}",
+        "ICLOUD_APP_PASSWORD": "${user_config.app_password}",
+        "ICLOUD_DRIVE_PATH": "${user_config.drive_path}"
+      }
+    }
+  },
+  "user_config": {
+    "apple_id": {
+      "type": "string",
+      "title": "Apple ID email",
+      "description": "The email address of your Apple ID (e.g. you@icloud.com / @me.com / @mac.com).",
+      "required": true,
+      "sensitive": false
+    },
+    "app_password": {
+      "type": "string",
+      "title": "App-specific password",
+      "description": "Generate at https://account.apple.com -> Sign-In and Security -> App-Specific Passwords -> Generate. This is NOT your Apple ID password. It grants full mail access and can be revoked individually at any time on the same page.",
+      "required": true,
+      "sensitive": true
+    },
+    "drive_path": {
+      "type": "string",
+      "title": "iCloud Drive folder (optional override)",
+      "description": "Leave empty to use the default location (Windows: %USERPROFILE%\\iCloudDrive, macOS: ~/Library/Mobile Documents/com~apple~CloudDocs). Set only if your iCloud Drive syncs to a custom folder.",
+      "required": false,
+      "sensitive": false
+    }
+  },
+  "tools": [
+    { "name": "icloud_status", "description": "Verifies the iCloud Mail sign-in and reports the account and available mailboxes." },
+    { "name": "icloud_mail_list", "description": "Lists messages from a mailbox (default inbox), newest first." },
+    { "name": "icloud_mail_search", "description": "Searches a mailbox by subject, sender, or body text." },
+    { "name": "icloud_mail_read", "description": "Fetches the full content of a single message: headers, plain-text body, attachment list." },
+    { "name": "icloud_mail_get_attachment", "description": "Saves a single attachment from a message to disk (max 25 MB)." },
+    { "name": "icloud_mail_create_draft", "description": "Creates a draft in the Drafts mailbox (not sent) - the preferred way to compose for review before sending." },
+    { "name": "icloud_mail_send", "description": "Sends an email immediately and irreversibly via SMTP, saving a copy to Sent Messages." },
+    { "name": "icloud_mail_move", "description": "Moves a message to another mailbox." },
+    { "name": "icloud_mail_mark", "description": "Updates the read and/or flagged state of a message." },
+    { "name": "icloud_drive_list", "description": "Lists files and folders in an iCloud Drive folder." },
+    { "name": "icloud_drive_search", "description": "Searches iCloud Drive by file/folder name, optionally scoped to a subfolder." },
+    { "name": "icloud_drive_get_metadata", "description": "Fetches size, timestamps, and type information for an iCloud Drive item." },
+    { "name": "icloud_drive_read_file", "description": "Reads an iCloud Drive file - small text files inline, others copied to disk (max 100 MB)." },
+    { "name": "icloud_drive_write_file", "description": "Writes text content or copies a local file into iCloud Drive (max 250 MB)." },
+    { "name": "icloud_drive_create_folder", "description": "Creates a new folder in iCloud Drive." },
+    { "name": "icloud_drive_move", "description": "Moves and/or renames an iCloud Drive item." },
+    { "name": "icloud_drive_delete", "description": "Deletes an iCloud Drive item to the OS recycle bin (recoverable, never permanent)." }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["win32", "darwin"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "privacy_policies": []
+}

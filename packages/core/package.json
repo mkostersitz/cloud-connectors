@@ -1,0 +1,33 @@
+{
+  "name": "@cloud-connectors/core",
+  "version": "0.1.0",
+  "description": "Shared, connector-agnostic helpers for cloud-connectors MCP servers: tool-result shapes, retry/backoff fetch, file utilities, HTML-to-text, and a stdio server bootstrap",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT"
+}

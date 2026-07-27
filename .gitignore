@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Build output (regenerate with: npm run build)
+dist/
+*.tsbuildinfo
+
+# Packed extension bundles (regenerate with: node scripts/pack-mcpb.mjs <package>)
+dist-bundle/
+*.tgz
+*.mcpb
+
+# Local scratch
+stderr.log
