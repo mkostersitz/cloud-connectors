@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import {
     PublicClientApplication,
     LogLevel,
@@ -9,8 +9,18 @@ import {
     type TokenCacheContext,
 } from '@azure/msal-node';
 import type { IPersistence, IPersistenceConfiguration } from '@azure/msal-node-extensions';
-import { AuthRequiredError } from '@cloud-connectors/core';
-import { clientId, cacheDir, cachePath, SCOPES, AUTHORITY } from './config.js';
+import { AuthRequiredError, createKeychainSealedStore, isKeychainSupported, type SealedStore } from '@cloud-connectors/core';
+import {
+    clientId,
+    cacheDir,
+    cachePath,
+    plaintextCachePath,
+    allowPlaintextTokenCache,
+    KEYCHAIN_SERVICE,
+    KEYCHAIN_ACCOUNT,
+    SCOPES,
+    AUTHORITY,
+} from './config.js';
 
 /**
  * Thrown by getToken() whenever there is no usable cached session. Callers (tool handlers,
@@ -65,10 +75,69 @@ function getPca(): Promise<PublicClientApplication> {
 }
 
 /**
- * Fallback ICachePlugin used when the platform-native secure store (DPAPI / Keychain /
- * libsecret, via @azure/msal-node-extensions) is unavailable. Reads/writes the raw MSAL
- * cache JSON to `filePath`, restricting file permissions to the owner on non-Windows
- * (Windows ACLs already default to the owning user for files under %LOCALAPPDATA%).
+ * ICachePlugin backed by a SealedStore: the MSAL cache is AES-256-GCM encrypted on disk under a
+ * data key held in the macOS Keychain. Unlike the msal-node-extensions Keychain path this needs
+ * no native binding, so it cannot be defeated by an architecture or Node-ABI mismatch between the
+ * machine that packed the bundle and the runtime that loads it.
+ */
+function createSealedCachePlugin(store: SealedStore): ICachePlugin {
+    return {
+        async beforeCacheAccess(context: TokenCacheContext): Promise<void> {
+            const data = await store.read();
+            if (data === undefined) return;
+            try {
+                context.cache.deserialize(data);
+            } catch {
+                // Decryption succeeded but the plaintext is not an MSAL cache. Degrade to
+                // "signed out" rather than failing every tool call.
+                console.error('[auth] decrypted token cache is not valid MSAL JSON; treating as empty (re-run ms_login)');
+                await store.clear().catch(() => {});
+            }
+        },
+        async afterCacheAccess(context: TokenCacheContext): Promise<void> {
+            if (context.cacheHasChanged) {
+                await store.write(context.cache.serialize());
+            }
+        },
+    };
+}
+
+/**
+ * One-time migration of a cache left behind by an earlier version: a bundle packed on Windows
+ * carries Windows-only native bindings, so on macOS it used to fall back to writing tokens to
+ * `<cachePath>.plain.json` in the clear. Re-seal any such file into the Keychain-backed store and
+ * delete the plaintext, so upgrading actually removes the exposure instead of just stopping new
+ * writes. Best-effort - a failure here must not block sign-in.
+ */
+async function migratePlaintextCache(store: SealedStore): Promise<void> {
+    let data: string;
+    try {
+        data = await readFile(plaintextCachePath, 'utf-8');
+    } catch {
+        return; // Nothing to migrate (the common case).
+    }
+
+    try {
+        if ((await store.read()) === undefined) {
+            await store.write(data);
+        }
+        await rm(plaintextCachePath, { force: true });
+        console.error(
+            `[auth] migrated the legacy plaintext token cache at ${plaintextCachePath} into the macOS Keychain-backed store and deleted it`,
+        );
+    } catch (err) {
+        console.error(
+            `[auth] could not migrate the legacy plaintext token cache at ${plaintextCachePath} ` +
+                `(${err instanceof Error ? err.message : String(err)}); delete it manually - it contains refresh tokens`,
+        );
+    }
+}
+
+/**
+ * Fallback ICachePlugin used when no platform-native secure store is available AND the user has
+ * explicitly opted in via MS_ALLOW_PLAINTEXT_TOKEN_CACHE. Reads/writes the raw MSAL cache JSON to
+ * `filePath`, restricting file permissions to the owner on non-Windows (Windows ACLs already
+ * default to the owning user for files under %LOCALAPPDATA%).
  */
 function createPlaintextCachePlugin(filePath: string): ICachePlugin {
     return {
@@ -105,14 +174,32 @@ function createPlaintextCachePlugin(filePath: string): ICachePlugin {
 }
 
 /**
- * Builds an MSAL ICachePlugin backed by the platform's native secure credential store when
- * possible (DPAPI on Windows, Keychain on macOS, libsecret on Linux via
- * @azure/msal-node-extensions), falling back to a plaintext on-disk cache file if the
- * package - or its per-platform native binding - cannot be loaded, or if creating the
- * native persistence otherwise fails.
+ * Builds an MSAL ICachePlugin backed by the platform's secure credential store:
+ *   - macOS:   AES-256-GCM file sealed under a data key in the login Keychain, reached through
+ *              the built-in `security` CLI (no native binding - see core/keychain.ts).
+ *   - Windows: DPAPI via @azure/msal-node-extensions.
+ *   - Linux:   libsecret via @azure/msal-node-extensions.
+ *
+ * If none of those works, this throws rather than quietly writing refresh tokens to disk in the
+ * clear. Setting MS_ALLOW_PLAINTEXT_TOKEN_CACHE=1 opts back into the old plaintext behaviour for
+ * environments with no secret service at all (a bare Linux container, say).
  */
 async function createCachePlugin(): Promise<ICachePlugin> {
     try {
+        if (isKeychainSupported()) {
+            const store = createKeychainSealedStore({
+                service: KEYCHAIN_SERVICE,
+                account: KEYCHAIN_ACCOUNT,
+                filePath: cachePath,
+            });
+            // Touch the Keychain now, so a locked keychain (or a denied access prompt) surfaces
+            // here - where the fail-closed policy below applies - rather than on the first token
+            // read, half way through a tool call.
+            await store.ensureReady();
+            await migratePlaintextCache(store);
+            return createSealedCachePlugin(store);
+        }
+
         if (process.platform === 'win32') {
             // Import the DPAPI persistence class directly by absolute file path instead of
             // the package root. The root (dist/index.mjs) re-exports KeychainPersistence,
@@ -138,30 +225,48 @@ async function createCachePlugin(): Promise<ICachePlugin> {
             return new pcpMod.PersistenceCachePlugin(persistence);
         }
 
-        // Non-Windows: the package root is required (Keychain/libsecret classes genuinely
-        // need keytar there). Dynamic import so a missing/mismatched native binding cannot
-        // crash the whole server at startup.
+        // Linux and friends: libsecret through the package root (which genuinely needs keytar
+        // there). Dynamic import so a missing/mismatched native binding cannot crash the whole
+        // server at startup.
         const extensions = await import('@azure/msal-node-extensions');
 
         const persistenceConfig: IPersistenceConfiguration = {
             cachePath,
             dataProtectionScope: 'CurrentUser',
-            serviceName: 'windows-live-connector',
-            accountName: 'msal-token-cache',
+            serviceName: KEYCHAIN_SERVICE,
+            accountName: KEYCHAIN_ACCOUNT,
         };
 
         const persistence: IPersistence = await extensions.PersistenceCreator.createPersistence(persistenceConfig);
         return new extensions.PersistenceCachePlugin(persistence);
     } catch (err) {
-        // Fall back to a plaintext cache in a SEPARATE file: the secure-store file may hold
-        // encrypted bytes another instance wrote, which the plaintext plugin must never
-        // try (and fail) to parse as its own.
-        const plainCachePath = `${cachePath}.plain.json`;
+        const detail = err instanceof Error ? err.message.split('\n')[0] : String(err);
+
+        if (!allowPlaintextTokenCache) {
+            // Fail closed. A long-lived refresh token in a readable file is a materially worse
+            // outcome than an unusable connector, and on both Windows and macOS reaching here at
+            // all means something is wrong that the user should hear about rather than silently
+            // trade away.
+            throw new Error(
+                `Secure token storage is unavailable on this system (${detail}), and this connector refuses to ` +
+                    'write Microsoft refresh tokens to disk unencrypted.\n' +
+                    (process.platform === 'darwin'
+                        ? 'On macOS this normally means the login keychain is locked or /usr/bin/security is not reachable - ' +
+                          'unlock the keychain in Keychain Access and retry.\n'
+                        : '') +
+                    'To override anyway (NOT recommended - the cache file grants full access to your mailbox and ' +
+                    `OneDrive until you revoke it), set MS_ALLOW_PLAINTEXT_TOKEN_CACHE=1 in this connector's environment.`,
+            );
+        }
+
+        // Opted in: keep the plaintext cache in a SEPARATE file, since the secure-store path may
+        // hold encrypted bytes that the plaintext plugin must never try (and fail) to parse.
         console.error(
-            `[auth] secure token-cache persistence unavailable (${err instanceof Error ? err.message.split('\n')[0] : String(err)}); ` +
-                `falling back to plaintext cache file at ${plainCachePath} - restrict access to this file`,
+            `[auth] secure token-cache persistence unavailable (${detail}); MS_ALLOW_PLAINTEXT_TOKEN_CACHE is set, ` +
+                `so falling back to an UNENCRYPTED cache file at ${plaintextCachePath} - anyone who can read that ` +
+                'file can read your mail and files. Revoke access at https://account.live.com/consent/Manage if it leaks.',
         );
-        return createPlaintextCachePlugin(plainCachePath);
+        return createPlaintextCachePlugin(plaintextCachePath);
     }
 }
 
@@ -177,7 +282,7 @@ async function buildPca(): Promise<PublicClientApplication> {
         );
     }
 
-    await mkdir(cacheDir, { recursive: true });
+    await mkdir(cacheDir, { recursive: true, mode: 0o700 });
 
     const cachePlugin = await createCachePlugin();
 

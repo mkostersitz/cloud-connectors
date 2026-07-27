@@ -1,6 +1,6 @@
 {
   "name": "@cloud-connectors/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared, connector-agnostic helpers for cloud-connectors MCP servers: tool-result shapes, retry/backoff fetch, file utilities, HTML-to-text, and a stdio server bootstrap",
   "type": "module",
   "main": "dist/index.js",
@@ -19,7 +19,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -29,5 +29,9 @@
   "files": [
     "dist"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "@hono/node-server": "^2.0.5",
+    "fast-uri": "^3.1.4"
+  }
 }

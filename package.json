@@ -13,5 +13,9 @@
     "build": "npm run build --workspace=@cloud-connectors/core && npm run build --workspace=windows-live-connector && npm run build --workspace=icloud-connector",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "@hono/node-server": "^2.0.5",
+    "fast-uri": "^3.1.4"
+  }
 }

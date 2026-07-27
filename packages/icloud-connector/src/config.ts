@@ -18,6 +18,24 @@ export const IMAP_PORT = 993; // implicit TLS
 export const SMTP_HOST = 'smtp.mail.me.com';
 export const SMTP_PORT = 587; // STARTTLS
 
+/**
+ * TLS settings applied to every iCloud connection. The app-specific password is a full-mailbox
+ * credential sent on the wire during AUTH, so certificate validation is not optional here: these
+ * are stated explicitly rather than left to library defaults, so that a future dependency upgrade
+ * (or a stray NODE_TLS_REJECT_UNAUTHORIZED in the environment) cannot quietly weaken them.
+ *
+ * `servername` pins SNI and hostname verification to Apple's host even if a proxy rewrites the
+ * connection target, and TLS 1.2 is the floor - Apple's servers negotiate 1.2/1.3 and nothing
+ * older is worth keeping compatible with.
+ */
+export function tlsOptions(servername: string): {
+    servername: string;
+    rejectUnauthorized: true;
+    minVersion: 'TLSv1.2';
+} {
+    return { servername, rejectUnauthorized: true, minVersion: 'TLSv1.2' };
+}
+
 export class ConfigError extends Error {
     constructor(message: string) {
         super(message);

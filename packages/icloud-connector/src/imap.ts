@@ -1,6 +1,6 @@
 import { ImapFlow } from 'imapflow';
 import { AuthRequiredError } from '@cloud-connectors/core';
-import { requireCredentials, IMAP_HOST, IMAP_PORT } from './config.js';
+import { requireCredentials, IMAP_HOST, IMAP_PORT, tlsOptions } from './config.js';
 
 /**
  * Well-known iCloud mailbox names, keyed by lowercase friendly alias. iCloud does not use the
@@ -92,7 +92,10 @@ export async function withImap<T>(fn: (client: ImapFlow) => Promise<T>): Promise
         host: IMAP_HOST,
         port: IMAP_PORT,
         secure: true,
+        tls: tlsOptions(IMAP_HOST),
         auth: { user, pass },
+        // Must stay false: imapflow's logger writes JSON to stdout, which is the MCP protocol
+        // channel, and its debug records include the credentials sent during AUTH.
         logger: false,
     });
 

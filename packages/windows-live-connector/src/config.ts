@@ -13,8 +13,8 @@ export const clientId: string | undefined = process.env.MS_CLIENT_ID;
 /**
  * Picks the platform-appropriate directory for persisting the MSAL token cache:
  *   - win32: %LOCALAPPDATA%\windows-live-connector (DPAPI-encrypted)
- *   - darwin: ~/Library/Application Support/windows-live-connector (Keychain-backed)
- *   - other: ~/.config/windows-live-connector (libsecret-backed, or plaintext fallback)
+ *   - darwin: ~/Library/Application Support/windows-live-connector (AES-256-GCM under a Keychain key)
+ *   - other: ~/.config/windows-live-connector (libsecret-backed)
  * Uses os.homedir() rather than the USERPROFILE env var so it works identically on
  * every platform.
  */
@@ -38,9 +38,27 @@ function computeCacheDir(): string {
 export const cacheDir: string = computeCacheDir();
 
 /**
- * Full path to the MSAL token cache file.
+ * Full path to the MSAL token cache file. Its contents are ciphertext on every supported
+ * platform: DPAPI-protected on Windows, AES-256-GCM under a Keychain-held data key on macOS.
  */
 export const cachePath: string = path.join(cacheDir, 'msal-cache.bin');
+
+/**
+ * Where an unencrypted cache lives if (and only if) MS_ALLOW_PLAINTEXT_TOKEN_CACHE is set.
+ * Kept separate from `cachePath` so the two formats can never be confused for one another - and
+ * so older versions' plaintext leftovers are findable at a known path for migration.
+ */
+export const plaintextCachePath = `${cachePath}.plain.json`;
+
+/**
+ * Escape hatch for systems with no secret service at all. Off by default: without it the
+ * connector refuses to persist refresh tokens rather than writing them out in the clear.
+ */
+export const allowPlaintextTokenCache: boolean = process.env.MS_ALLOW_PLAINTEXT_TOKEN_CACHE === '1';
+
+/** Identifiers for the OS credential-store item holding this connector's token-cache key. */
+export const KEYCHAIN_SERVICE = 'windows-live-connector';
+export const KEYCHAIN_ACCOUNT = 'msal-token-cache';
 
 /**
  * Delegated Microsoft Graph scopes requested for the personal Microsoft Account.

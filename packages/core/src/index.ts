@@ -16,3 +16,10 @@ export {
 export { htmlToText } from './htmlToText.js';
 
 export { serveStdio } from './serveStdio.js';
+
+export { isKeychainSupported, keychainGet, keychainSet, keychainDelete } from './keychain.js';
+
+export { createKeychainSealedStore } from './sealedStore.js';
+export type { SealedStore, SealedStoreOptions } from './sealedStore.js';
+
+export { assertHeaderSafe, normalizeEmailAddress, normalizeRecipients, addrSpecOnly } from './mailAddress.js';
