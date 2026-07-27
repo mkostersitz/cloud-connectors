@@ -1,6 +1,6 @@
 {
   "name": "windows-live-connector",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "MCP connector for Claude Desktop: OneDrive and Outlook Mail via personal Microsoft Account",
   "type": "module",
   "main": "dist/index.js",
@@ -17,11 +17,22 @@
     "@azure/msal-node": "^5.4.1",
     "@azure/msal-node-extensions": "^5.3.3",
     "@cloud-connectors/core": "*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.5",
+    "fast-uri": "^3.1.4"
+  },
+  "mcpb": {
+    "omitDependencies": {
+      "darwin": [
+        "@azure/msal-node-extensions"
+      ]
+    }
   }
 }

@@ -3,7 +3,16 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { ok, wrapHandler, htmlToText, sanitizeFilename, defaultDownloadDir } from '@cloud-connectors/core';
+import {
+    ok,
+    wrapHandler,
+    htmlToText,
+    sanitizeFilename,
+    defaultDownloadDir,
+    assertHeaderSafe,
+    normalizeRecipients,
+    addrSpecOnly,
+} from '@cloud-connectors/core';
 import { graphFetch } from '../graph.js';
 
 const AUTH_MESSAGE = 'Not signed in. Run ms_login first.';
@@ -18,6 +27,15 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 interface EmailAddressRecipient {
     emailAddress?: { name?: string; address?: string };
+}
+
+/**
+ * Maps validated recipients to Graph's recipient shape. Graph composes the MIME itself, so the
+ * `address` field must be a bare addr-spec - a `Name <addr>` string there is rejected as an
+ * invalid address rather than parsed.
+ */
+function toGraphRecipients(addresses: string[]): EmailAddressRecipient[] {
+    return addresses.map((address) => ({ emailAddress: { address: addrSpecOnly(address) } }));
 }
 
 interface GraphMessage {
@@ -288,12 +306,10 @@ export function registerMailTools(server: McpServer): void {
         },
         wrapHandler(async ({ to, subject, body, cc }): Promise<CallToolResult> => {
             const payload = {
-                subject,
+                subject: assertHeaderSafe(subject, 'Subject'),
                 body: { contentType: 'Text', content: body },
-                toRecipients: to.map((address) => ({ emailAddress: { address } })),
-                ...(cc && cc.length > 0
-                    ? { ccRecipients: cc.map((address) => ({ emailAddress: { address } })) }
-                    : {}),
+                toRecipients: toGraphRecipients(normalizeRecipients(to, 'To', { required: true })),
+                ...(cc && cc.length > 0 ? { ccRecipients: toGraphRecipients(normalizeRecipients(cc, 'Cc')) } : {}),
             };
 
             const draft: GraphMessage = await graphFetch('/me/messages', {
@@ -335,13 +351,12 @@ export function registerMailTools(server: McpServer): void {
                 throw new Error('Provide either draft_id, or all of to/subject/body to compose and send a new message.');
             }
 
+            const toList = normalizeRecipients(to, 'To', { required: true });
             const message = {
-                subject,
+                subject: assertHeaderSafe(subject, 'Subject'),
                 body: { contentType: 'Text', content: body },
-                toRecipients: to.map((address) => ({ emailAddress: { address } })),
-                ...(cc && cc.length > 0
-                    ? { ccRecipients: cc.map((address) => ({ emailAddress: { address } })) }
-                    : {}),
+                toRecipients: toGraphRecipients(toList),
+                ...(cc && cc.length > 0 ? { ccRecipients: toGraphRecipients(normalizeRecipients(cc, 'Cc')) } : {}),
             };
 
             await graphFetch('/me/sendMail', {
@@ -349,7 +364,7 @@ export function registerMailTools(server: McpServer): void {
                 body: JSON.stringify({ message, saveToSentItems: true }),
             });
 
-            return ok(`Message sent to ${to.join(', ')}.`);
+            return ok(`Message sent to ${toList.join(', ')}.`);
         }, { authMessage: AUTH_MESSAGE }),
     );
 

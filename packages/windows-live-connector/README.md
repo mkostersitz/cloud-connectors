@@ -1,6 +1,6 @@
 # Windows Live Connector for Claude Desktop
 
-Local MCP server giving Claude Desktop access to a **personal Microsoft Account**'s OneDrive and Outlook Mail via Microsoft Graph. Auth is OAuth 2.0 authorization-code + PKCE (public client, no secret); tokens are cached in the OS's secure credential store (Windows DPAPI under `%LOCALAPPDATA%\windows-live-connector\`, macOS Keychain where available) with a plaintext-file fallback if the native binding isn't present. Ships as a one-click Claude Desktop extension (`.mcpb`) that installs the same way on Windows and macOS.
+Local MCP server giving Claude Desktop access to a **personal Microsoft Account**'s OneDrive and Outlook Mail via Microsoft Graph. Auth is OAuth 2.0 authorization-code + PKCE (public client, no secret); the token cache is always encrypted at rest — DPAPI on Windows (`%LOCALAPPDATA%\windows-live-connector\`), AES-256-GCM under a macOS Keychain key on macOS (`~/Library/Application Support/windows-live-connector/`) — and the connector **refuses to sign in** rather than storing refresh tokens unencrypted. Ships as a one-click Claude Desktop extension (`.mcpb`), built separately per platform.
 
 > Teams is intentionally out of scope: Microsoft Graph does not expose Teams chat APIs to personal Microsoft accounts. See PLAN.md.
 
@@ -18,11 +18,23 @@ No client secret, no admin consent, no publisher verification needed. The delega
 
 ### 2. Install the extension (recommended: one-click `.mcpb` bundle)
 
-Grab `dist-bundle/windows-live-connector-0.2.0.mcpb` and either double-click it or drag it onto Claude Desktop, then go to **Settings → Extensions**, find "Windows Live (OneDrive + Outlook)", and click Install. Claude Desktop prompts for one field — **Microsoft App (client) ID** — paste the Application (client) ID from step 1 there. The bundle carries its own Node runtime dependencies, so there is nothing else to install.
+Grab the bundle for your platform from `dist-bundle/` (`windows-live-connector-<version>-macos.mcpb` or `-windows.mcpb`) and either double-click it or drag it onto Claude Desktop, then go to **Settings → Extensions**, find "Windows Live (OneDrive + Outlook)", and click Install. Claude Desktop prompts for one field — **Microsoft App (client) ID** — paste the Application (client) ID from step 1 there. The bundle carries its own Node runtime dependencies, so there is nothing else to install.
 
 Restart Claude Desktop if prompted, then ask Claude to run `ms_login` — a browser window opens for Microsoft sign-in and consent. The session persists across restarts; you only sign in again if you change your password or go ~90 days without use.
 
-**macOS note on token storage:** the token cache uses the macOS Keychain when the platform-native secure-storage binding is available, and otherwise falls back automatically to a permissions-restricted plaintext file under `~/Library/Application Support/windows-live-connector/` (with a warning printed to stderr, visible in Claude Desktop's MCP logs). The bundle built on this Windows machine ships a Windows-only native binding for the underlying credential-store library (`keytar`), so on macOS it currently uses the plaintext fallback — see "Rebuilding the bundle" below for what a mac-built bundle needs to get Keychain storage instead. This is a non-fatal, by-design fallback: all connector functionality works identically either way.
+**Pick the bundle for your platform.** Bundles are named `...-macos.mcpb` and `...-windows.mcpb`, and each declares its platform in the manifest, so Claude Desktop will decline the wrong one. A `.mcpb` is a frozen `node_modules`, which is why one artifact cannot serve both.
+
+### Token storage
+
+| | Windows | macOS |
+|---|---|---|
+| At rest | DPAPI, scoped to your Windows user | AES-256-GCM file, key held in your login Keychain |
+| Mechanism | `dpapi.node` native binding | `/usr/bin/security` — **no native module** |
+| If unavailable | Sign-in refused | Sign-in refused |
+
+The macOS path deliberately avoids a compiled addon. The usual library for this (`keytar`) is archived, and its binding is tied to one CPU architecture *and* one Node ABI — so a bundle packed on one machine routinely fails to load under a different Claude Desktop build, which is precisely how an earlier version of this connector ended up silently writing refresh tokens to a plaintext file. The `security` CLI ships with macOS and has neither coupling.
+
+If a secure store genuinely cannot be reached, the connector raises an error instead of degrading. Upgrading from ≤0.2.x also re-seals any plaintext cache the old version left behind and deletes it, so the exposure is removed rather than merely stopped. The escape hatch `MS_ALLOW_PLAINTEXT_TOKEN_CACHE=1` restores the old behaviour for environments with no secret service at all; it is off by default and not recommended — that file grants full access to your mailbox and OneDrive until you revoke the session at https://account.live.com/consent/Manage.
 
 ### 3. Alternative / dev install (unpackaged, via config file)
 
@@ -55,13 +67,15 @@ Restart Claude Desktop, then ask Claude to run `ms_login` as above.
 
 ### Rebuilding the bundle
 
-```powershell
-npm run build && npx @anthropic-ai/mcpb pack
+From the monorepo root:
+
+```bash
+node scripts/pack-mcpb.mjs windows-live-connector --platform=darwin
 ```
 
-This regenerates `dist/` and repacks `windows-live-connector-0.2.0.mcpb` (manifest, compiled JS, and `node_modules`; see `.mcpbignore` for exclusions — `src/`, TypeScript sources, `tsconfig.json`, `PLAN.md`). devDependencies are pruned before packing and restored with `npm install` afterward to keep the archive small.
+`--platform` defaults to the host OS; `win32` produces the Windows bundle. Output lands in `dist-bundle/windows-live-connector-<version>-<macos|windows>.mcpb`.
 
-To get **Keychain-backed** token storage in a mac-distributed bundle instead of the plaintext fallback, run the pack step on macOS itself (or `npm rebuild keytar` on a Mac before packing) — `keytar`'s own install script (`prebuild-install`) then fetches the correct darwin arm64/x64 native binding automatically, no manual steps needed. A single `node_modules` tree built on one OS can't serve both platforms' native `keytar.node` binding at once, because `keytar`'s loader (`lib/keytar.js`) always requires one fixed path rather than picking a binary per-platform at runtime — which is exactly why the connector degrades gracefully to the plaintext cache instead of crashing when the binding doesn't match the host OS.
+The macOS bundle can be packed on any host, because nothing in it is compiled — `@azure/msal-node-extensions` (and with it `keytar`) is dropped for `darwin` via `mcpb.omitDependencies` in `package.json`, and the pack script fails if a `.node` file makes it into a macOS bundle at all. The **Windows** bundle must be packed on Windows, since it needs the real `dpapi.node` binding; the pack script checks for it. See the root README for what else the pack step verifies.
 
 ## Tools (19)
 
@@ -76,7 +90,8 @@ To get **Keychain-backed** token storage in a mac-distributed bundle instead of 
 - Send/delete are separate, `destructiveHint`-annotated tools; Claude is instructed to confirm with you first.
 - Deletes go to the OneDrive recycle bin, never permanent.
 - Attachment saves cap at 25 MB, file reads at 100 MB; filenames are sanitized.
-- Token cache uses the OS-native secure credential store (DPAPI on Windows, Keychain on macOS when available), scoped to your user account; falls back to a permissions-restricted plaintext file with a logged warning if the native binding is unavailable.
+- Recipient addresses and subjects are validated before use; line breaks and control characters are rejected, so a composed message cannot inject extra headers.
+- Token cache is encrypted at rest and scoped to your user account (DPAPI on Windows; AES-256-GCM under a login-Keychain key on macOS, `0600` file in a `0700` directory). If neither is reachable the connector errors out instead of writing tokens in the clear — see "Token storage" above.
 - stdout carries only MCP JSON-RPC; all diagnostics go to stderr (visible in Claude Desktop's MCP logs).
 
 ## Development
@@ -86,6 +101,6 @@ npm run typecheck   # tsc --noEmit
 npm run build       # emit dist/
 ```
 
-Layout: `src/config.ts` (client id, scopes, cache path) · `src/auth.ts` (MSAL PKCE + DPAPI cache) · `src/graph.ts` (Graph fetch with 429/503 backoff) · `src/tools/{authTools,mail,onedrive}.ts` · `src/index.ts` (server bootstrap).
+Layout: `src/config.ts` (client id, scopes, cache paths) · `src/auth.ts` (MSAL PKCE + per-platform encrypted cache) · `src/graph.ts` (Graph fetch with 429/503 backoff) · `src/tools/{authTools,mail,onedrive}.ts` · `src/index.ts` (server bootstrap). The macOS Keychain and sealed-file primitives live in `@cloud-connectors/core` (`src/keychain.ts`, `src/sealedStore.ts`).
 
 Packaging: `manifest.json` (MCPB manifest, spec version 0.3) at the project root, `.mcpbignore` excludes source/dev files from the bundle. See "Rebuilding the bundle" above.

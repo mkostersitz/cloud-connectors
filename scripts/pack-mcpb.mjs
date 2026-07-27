@@ -8,9 +8,18 @@
  * dependencies. This script instead builds a throwaway staging directory with a *real*,
  * non-hoisted node_modules (via `npm pack` + `npm install`) and packs that.
  *
+ * Bundles are per-platform. A .mcpb is a frozen node_modules, so anything platform-specific in
+ * there (a native addon, a credential-store backend) is baked in at pack time - which is why a
+ * Windows-packed bundle used to degrade to plaintext token storage on macOS. The target platform
+ * therefore selects which dependencies are installed, is stamped into the staged manifest's
+ * `compatibility.platforms`, and appears in the output filename.
+ *
  * Usage:
- *   node scripts/pack-mcpb.mjs <package-dir-name>
- *   e.g. node scripts/pack-mcpb.mjs windows-live-connector
+ *   node scripts/pack-mcpb.mjs <package-dir-name> [--platform=darwin|win32]
+ *   e.g. node scripts/pack-mcpb.mjs windows-live-connector --platform=darwin
+ *
+ * `--platform` defaults to the host platform. Cross-packing is allowed only when the target needs
+ * no native code for that platform (enforced below), since npm cannot build another OS's addons.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -33,6 +42,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const isWindows = process.platform === 'win32';
 
+/** Node platform id -> the label used in bundle filenames. */
+const PLATFORM_LABELS = { darwin: 'macos', win32: 'windows' };
+
 function run(cmd, args, opts = {}) {
     console.log(`\n> ${cmd} ${args.join(' ')}${opts.cwd ? `  (cwd: ${opts.cwd})` : ''}`);
     execFileSync(cmd, args, { stdio: 'inherit', shell: isWindows, ...opts });
@@ -44,9 +56,28 @@ function fail(message) {
 }
 
 async function main() {
-    const targetName = process.argv[2];
+    const args = process.argv.slice(2);
+    const targetName = args.find((a) => !a.startsWith('--'));
     if (!targetName) {
-        fail('Usage: node scripts/pack-mcpb.mjs <package-dir-name>  (e.g. windows-live-connector)');
+        fail('Usage: node scripts/pack-mcpb.mjs <package-dir-name> [--platform=darwin|win32]');
+    }
+
+    const platformArg = args.find((a) => a.startsWith('--platform='))?.split('=')[1];
+    const targetPlatform = platformArg ?? process.platform;
+    if (!PLATFORM_LABELS[targetPlatform]) {
+        fail(`Unsupported --platform "${targetPlatform}" (expected one of: ${Object.keys(PLATFORM_LABELS).join(', ')})`);
+    }
+    const platformLabel = PLATFORM_LABELS[targetPlatform];
+    console.log(`target platform: ${targetPlatform} (${platformLabel}); host: ${process.platform}`);
+
+    // Cross-packing is only sound when the target needs no compiled code. A Windows bundle does
+    // (dpapi.node for the token cache), and npm would install this host's binaries alongside it,
+    // so the result would be a bundle that cannot load its own credential store.
+    if (targetPlatform === 'win32' && process.platform !== 'win32') {
+        fail(
+            'Windows bundles must be packed on Windows: they ship native bindings, and npm would install ' +
+                `${process.platform} binaries here. macOS bundles are pure JavaScript and can be packed anywhere.`,
+        );
     }
 
     const targetDir = path.join(ROOT, 'packages', targetName);
@@ -86,7 +117,16 @@ async function main() {
     const stagingDir = path.join(workRoot, 'staging');
     mkdirSync(stagingDir, { recursive: true });
 
-    cpSync(manifestPath, path.join(stagingDir, 'manifest.json'));
+    // Stamp the target platform into the staged manifest so Claude Desktop refuses to install a
+    // macOS bundle on Windows (or vice versa) rather than installing one that silently misbehaves.
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const declaredPlatforms = manifest.compatibility?.platforms;
+    if (Array.isArray(declaredPlatforms) && !declaredPlatforms.includes(targetPlatform)) {
+        fail(`packages/${targetName}/manifest.json declares platforms ${JSON.stringify(declaredPlatforms)}, which does not include "${targetPlatform}"`);
+    }
+    manifest.compatibility = { ...manifest.compatibility, platforms: [targetPlatform] };
+    writeFileSync(path.join(stagingDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+
     cpSync(distDir, path.join(stagingDir, 'dist'), { recursive: true });
 
     // Deliberately NOT staging the package's .mcpbignore: the staging dir contains no
@@ -107,13 +147,38 @@ async function main() {
         ...pkg.dependencies,
         '@cloud-connectors/core': `file:./${stagedCoreTgzName}`,
     };
+
+    // Drop dependencies this platform's code path never imports. The motivating case is
+    // @azure/msal-node-extensions on macOS: it exists only for the Windows DPAPI token cache, but
+    // pulls in keytar - an archived, unmaintained native addon whose compiled binding is tied to
+    // one CPU architecture and one Node ABI. Shipping it in a macOS bundle adds a binary that
+    // cannot reliably load, so the connector uses the `security` CLI there instead and this
+    // removes the dead weight (see packages/core/src/keychain.ts).
+    const omitted = pkg.mcpb?.omitDependencies?.[targetPlatform] ?? [];
+    for (const dep of omitted) {
+        if (!stagedPkg.dependencies[dep]) {
+            fail(`package.json mcpb.omitDependencies lists "${dep}" for ${targetPlatform}, but it is not a dependency`);
+        }
+        delete stagedPkg.dependencies[dep];
+        console.log(`omitting dependency for ${targetPlatform}: ${dep}`);
+    }
+
     delete stagedPkg.devDependencies;
     delete stagedPkg.scripts;
+    delete stagedPkg.mcpb;
     writeFileSync(path.join(stagingDir, 'package.json'), `${JSON.stringify(stagedPkg, null, 2)}\n`, 'utf-8');
 
     // ---- 4. npm install --omit=dev in staging: real, non-hoisted node_modules ---------
     console.log('\n=== Step 4/6: npm install --omit=dev in staging ===');
-    run('npm', ['install', '--omit=dev'], { cwd: stagingDir });
+    // --ignore-scripts: nothing that ends up in a bundle needs a lifecycle script, and refusing to
+    // run them means a compromised transitive package cannot execute code on the packing machine.
+    // If a future dependency genuinely needs one, the smoke test below will catch it.
+    run('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--fund=false'], { cwd: stagingDir });
+
+    // Vulnerability gate on exactly the tree that ships. The root workspace being clean does not
+    // prove this is: staging resolves fresh, so anything not pinned could float upward.
+    console.log('\n--- npm audit (runtime deps that will ship) ---');
+    auditStaging(stagingDir);
 
     const stagedCoreDir = path.join(stagingDir, 'node_modules', '@cloud-connectors', 'core');
     if (!existsSync(path.join(stagedCoreDir, 'package.json'))) {
@@ -127,23 +192,8 @@ async function main() {
     // now-redundant copy sitting at the staging root so it doesn't bloat the bundle.
     rmSync(path.join(stagingDir, stagedCoreTgzName), { force: true });
 
-    // Windows-native-binding check: @azure/msal-node-extensions ships per-platform native
-    // bindings (DPAPI support on Windows) fetched at install time - confirm they made it
-    // into the staging install, since a bundle without them silently falls back to a
-    // plaintext token cache.
-    const mnePkgDir = path.join(stagingDir, 'node_modules', '@azure', 'msal-node-extensions');
-    if (existsSync(mnePkgDir)) {
-        const dpapiHits = findFiles(path.join(mnePkgDir, 'bin'), (name) => name === 'dpapi.node');
-        if (isWindows) {
-            if (dpapiHits.length === 0) {
-                fail('staging node_modules/@azure/msal-node-extensions/bin has no dpapi.node - DPAPI support would be missing from the bundle');
-            } else {
-                console.log(`DPAPI native binding present: ${dpapiHits.map((p) => path.relative(stagingDir, p)).join(', ')}`);
-            }
-        }
-    } else {
-        console.log('note: @azure/msal-node-extensions not present in staging (not a dependency of this package)');
-    }
+    // ---- 4a. Native-binding policy for the target platform ----------------------------
+    checkNativeBindings(stagingDir, targetPlatform);
 
     // ---- 4b. Boot the staged server: catches missing/broken node_modules before pack ---
     console.log('\n=== Step 4b: smoke-test the staged server ===');
@@ -153,7 +203,7 @@ async function main() {
     console.log('\n=== Step 5/6: mcpb pack ===');
     const bundleDir = path.join(ROOT, 'dist-bundle');
     mkdirSync(bundleDir, { recursive: true });
-    const outputPath = path.join(bundleDir, `${targetName}-${pkg.version}.mcpb`);
+    const outputPath = path.join(bundleDir, `${targetName}-${pkg.version}-${platformLabel}.mcpb`);
     run('npx', ['--yes', '@anthropic-ai/mcpb', 'pack', stagingDir, outputPath], { cwd: ROOT });
 
     if (!existsSync(outputPath)) {
@@ -162,7 +212,7 @@ async function main() {
 
     // ---- 6. Sanity-check the produced bundle ------------------------------------------
     console.log('\n=== Step 6/6: sanity-check the bundle ===');
-    sanityCheckBundle(outputPath);
+    sanityCheckBundle(outputPath, targetPlatform);
 
     console.log(`\nOK: ${path.relative(ROOT, outputPath)}`);
 
@@ -232,6 +282,92 @@ async function smokeTestStagedServer(stagingDir) {
     console.log(`staged server boots: initialize ok, ${toolCount} tools listed`);
 }
 
+/**
+ * Runs `npm audit` against the staged (runtime-only) tree and fails the pack on anything
+ * high or critical. Moderate and low findings are printed but do not block - the point is a hard
+ * floor on what may be shipped, not a clean-desk policy that gets bypassed with --force.
+ */
+function auditStaging(stagingDir) {
+    let report;
+    try {
+        report = execFileSync('npm', ['audit', '--omit=dev', '--json'], {
+            cwd: stagingDir,
+            encoding: 'utf-8',
+            shell: isWindows,
+            maxBuffer: 32 * 1024 * 1024,
+        });
+    } catch (err) {
+        // npm audit exits non-zero when it finds anything; the JSON report is still on stdout.
+        report = err.stdout;
+        if (!report) {
+            console.warn('warning: npm audit could not run (offline?); skipping the vulnerability gate');
+            return;
+        }
+    }
+
+    let vulnerabilities;
+    try {
+        ({ vulnerabilities } = JSON.parse(report).metadata ?? {});
+    } catch {
+        console.warn('warning: npm audit produced unparseable output; skipping the vulnerability gate');
+        return;
+    }
+    if (!vulnerabilities) {
+        console.warn('warning: npm audit report had no metadata; skipping the vulnerability gate');
+        return;
+    }
+
+    const { critical = 0, high = 0, moderate = 0, low = 0 } = vulnerabilities;
+    console.log(`audit: ${critical} critical, ${high} high, ${moderate} moderate, ${low} low`);
+    if (critical + high > 0) {
+        fail(
+            `staged dependency tree has ${critical} critical and ${high} high-severity advisories. ` +
+                'Run `npm audit` at the repo root and upgrade (or pin via the "overrides" field) before packing.',
+        );
+    }
+}
+
+/**
+ * Enforces what native code may ship for the target platform.
+ *
+ * macOS: none at all. Every macOS code path is pure JavaScript by design (the Keychain is reached
+ * through /usr/bin/security), so a `.node` file in the bundle means a dependency slipped a
+ * compiled addon in - which would be built for this machine's exact Node ABI and architecture and
+ * would fail to load under a different Claude Desktop runtime, taking its feature with it.
+ *
+ * Windows: the DPAPI binding is required, since it is what encrypts the token cache there.
+ */
+function checkNativeBindings(stagingDir, targetPlatform) {
+    const modulesDir = path.join(stagingDir, 'node_modules');
+    const nativeFiles = findFiles(modulesDir, (name) => name.endsWith('.node')).map((p) =>
+        path.relative(stagingDir, p),
+    );
+
+    if (targetPlatform === 'darwin') {
+        if (nativeFiles.length > 0) {
+            fail(
+                'macOS bundles must contain no native addons, but the staged tree has:\n  - ' +
+                    `${nativeFiles.join('\n  - ')}\n` +
+                    'Add the offending package to "mcpb.omitDependencies.darwin" in the connector package.json, ' +
+                    'or replace it with a pure-JS equivalent.',
+            );
+        }
+        console.log('native-binding policy (darwin): clean - no .node files in the bundle');
+        return;
+    }
+
+    if (targetPlatform === 'win32') {
+        const dpapi = nativeFiles.filter((p) => p.endsWith('dpapi.node'));
+        if (dpapi.length === 0) {
+            fail(
+                'Windows bundles must ship @azure/msal-node-extensions/bin/<arch>/dpapi.node - without it the ' +
+                    'connector cannot DPAPI-encrypt the token cache and will refuse to store credentials.',
+            );
+        }
+        console.log(`native-binding policy (win32): DPAPI present (${dpapi.join(', ')})`);
+    }
+}
+
 /** Recursively finds files under `dir` whose basename matches `matchName`. Returns [] if `dir` doesn't exist. */
 function findFiles(dir, matchName) {
     if (!existsSync(dir)) return [];
@@ -252,7 +388,7 @@ function findFiles(dir, matchName) {
 }
 
 /** Lists a .mcpb (zip) file's entries via the `unzip` CLI and asserts expected structure. */
-function sanityCheckBundle(mcpbPath) {
+function sanityCheckBundle(mcpbPath, targetPlatform) {
     const listing = execFileSync('unzip', ['-Z1', mcpbPath], { encoding: 'utf-8' });
     const entries = listing.split(/\r?\n/).filter(Boolean);
 
@@ -270,13 +406,30 @@ function sanityCheckBundle(mcpbPath) {
     if (entries.some((e) => !e.startsWith('node_modules/') && e.endsWith('.ts') && !e.endsWith('.d.ts'))) {
         problems.push('bundle contains .ts source file(s) outside node_modules');
     }
+    // Re-check the native-binding policy on the actual zip, not just the staging directory:
+    // this is the artifact that ships, and it is cheap to be certain about.
+    const nativeEntries = entries.filter((e) => e.endsWith('.node'));
+    if (targetPlatform === 'darwin' && nativeEntries.length > 0) {
+        problems.push(`macOS bundle contains native addon(s): ${nativeEntries.join(', ')}`);
+    }
+    if (targetPlatform === 'win32' && !nativeEntries.some((e) => e.endsWith('dpapi.node'))) {
+        problems.push('Windows bundle is missing dpapi.node (token cache could not be DPAPI-encrypted)');
+    }
+    // A packed-in dotenv/credential file would ship someone's secrets to every installer.
+    const secretish = entries.filter((e) => /(^|\/)\.env(\.|$)|(^|\/)\.npmrc$/.test(e) && !e.startsWith('node_modules/'));
+    if (secretish.length > 0) {
+        problems.push(`bundle contains credential-bearing file(s): ${secretish.join(', ')}`);
+    }
 
     if (problems.length > 0) {
         fail(`bundle sanity check failed:\n  - ${problems.join('\n  - ')}`);
     }
 
     console.log(`bundle entries: ${entries.length}`);
-    console.log('sanity checks passed: manifest.json at root, dist/index.js, @cloud-connectors/core present, @modelcontextprotocol present, no src/ or .ts files');
+    console.log(
+        'sanity checks passed: manifest.json at root, dist/index.js, @cloud-connectors/core present, ' +
+            `@modelcontextprotocol present, no src/ or .ts files, native-binding policy ok for ${targetPlatform}, no .env/.npmrc`,
+    );
 }
 
 main().catch((err) => {

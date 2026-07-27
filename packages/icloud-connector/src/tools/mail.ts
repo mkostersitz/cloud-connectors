@@ -19,8 +19,11 @@ import {
     defaultDownloadDir,
     formatBytes,
     AuthRequiredError,
+    assertHeaderSafe,
+    normalizeRecipients,
+    addrSpecOnly,
 } from '@cloud-connectors/core';
-import { requireCredentials, SMTP_HOST, SMTP_PORT, ConfigError } from '../config.js';
+import { requireCredentials, SMTP_HOST, SMTP_PORT, ConfigError, tlsOptions } from '../config.js';
 import { withImap, encodeMessageId, decodeMessageId, resolveMailbox, isAuthFailure } from '../imap.js';
 
 const AUTH_MESSAGE =
@@ -357,10 +360,14 @@ export function registerMailTools(server: McpServer): void {
                 const { user } = requireCredentials();
                 const draftsMailbox = resolveMailbox('drafts');
 
+                const toList = normalizeRecipients(to, 'To', { required: true });
+                const ccList = normalizeRecipients(cc, 'Cc');
+                assertHeaderSafe(subject, 'Subject');
+
                 const raw = await new MailComposer({
                     from: user,
-                    to,
-                    ...(cc && cc.length > 0 ? { cc } : {}),
+                    to: toList,
+                    ...(ccList.length > 0 ? { cc: ccList } : {}),
                     subject,
                     text: body,
                 })
@@ -397,17 +404,20 @@ export function registerMailTools(server: McpServer): void {
         },
         wrapHandler(
             async ({ to, subject, body, cc }): Promise<CallToolResult> => {
-                if (!to || to.length === 0) {
-                    throw new Error('At least one recipient (to) is required.');
-                }
                 const { user, pass } = requireCredentials();
+
+                // Validate before anything is composed or connected: these strings become RFC 5322
+                // headers and SMTP RCPT TO commands, where an embedded CRLF is injection.
+                const toList = normalizeRecipients(to, 'To', { required: true });
+                const ccList = normalizeRecipients(cc, 'Cc');
+                assertHeaderSafe(subject, 'Subject');
 
                 // Compose once so the bytes actually sent and the bytes archived to Sent Messages
                 // are identical.
                 const raw = await new MailComposer({
                     from: user,
-                    to,
-                    ...(cc && cc.length > 0 ? { cc } : {}),
+                    to: toList,
+                    ...(ccList.length > 0 ? { cc: ccList } : {}),
                     subject,
                     text: body,
                 })
@@ -418,13 +428,16 @@ export function registerMailTools(server: McpServer): void {
                     host: SMTP_HOST,
                     port: SMTP_PORT,
                     secure: false,
+                    // STARTTLS is mandatory, not opportunistic: without requireTLS a server that
+                    // omits the STARTTLS capability would get the app-specific password in clear.
                     requireTLS: true,
+                    tls: tlsOptions(SMTP_HOST),
                     auth: { user, pass },
                 });
 
                 try {
                     await transport.sendMail({
-                        envelope: { from: user, to: [...to, ...(cc ?? [])] },
+                        envelope: { from: user, to: [...toList, ...ccList].map(addrSpecOnly) },
                         raw,
                     });
                 } catch (err) {
@@ -446,7 +459,7 @@ export function registerMailTools(server: McpServer): void {
                     sentCopyNote = ` Warning: the message was sent, but saving a copy to Sent Messages failed: ${message}`;
                 }
 
-                return ok(`Message sent to ${to.join(', ')}.${sentCopyNote}`);
+                return ok(`Message sent to ${toList.join(', ')}.${sentCopyNote}`);
             },
             { authMessage: AUTH_MESSAGE, mapError: (err) => mapConfigError(err) },
         ),
